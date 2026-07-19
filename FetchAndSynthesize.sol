@@ -2,10 +2,13 @@
 pragma solidity ^0.8.24;
 
 /// @title FetchAndSynthesize
-/// @notice Day 13 — fixes yesterday's known bug (raw JSON passed directly
-///         as LLM prompt). Adds a parsing/cleanup step between fetch and
-///         inference. First full working chained pipeline: end to end.
+/// @notice Day 17 — wires the Scheduler precompile to trigger the
+///         fetch → parse → synthesize → write pipeline once daily,
+///         removing the need for manual triggering.
 /// @dev Repo: github.com/NealPanchal/ritual-build
+///      Confirm ISchedulerPrecompile signature against ritual-dapp-scheduler
+///      before relying on this in production — interface below reflects
+///      what's confirmed as of today's docs read.
 
 interface IHTTPPrecompile {
     struct HTTPRequest {
@@ -30,25 +33,44 @@ interface IRitualWallet {
     function deposit(uint256 lockDuration) external payable;
 }
 
+interface ISchedulerPrecompile {
+    function registerRecurring(
+        address target,
+        bytes4 selector,
+        uint256 interval
+    ) external returns (uint256 jobId);
+
+    function cancel(uint256 jobId) external;
+}
+
 contract FetchAndSynthesize {
-    address constant HTTP_PRECOMPILE = 0x0000000000000000000000000000000000000801;
-    address constant LLM_PRECOMPILE  = 0x0000000000000000000000000000000000000802;
-    address constant RITUAL_WALLET   = 0x0000000000000000000000000000000000000100;
+    address constant HTTP_PRECOMPILE      = 0x0000000000000000000000000000000000000801;
+    address constant LLM_PRECOMPILE       = 0x0000000000000000000000000000000000000802;
+    address constant RITUAL_WALLET        = 0x0000000000000000000000000000000000000100;
+    address constant SCHEDULER_PRECOMPILE = 0x0000000000000000000000000000000000000110; // CONFIRM real address
+
+    string public dataSourceUrl;
+    string public instruction;
 
     string public lastRawFetch;
-    string public lastParsedInput;   // NEW — the cleaned data actually sent to LLM
+    string public lastParsedInput;
     string public lastSynthesis;
 
     address public owner;
     bool public walletFunded;
+    uint256 public schedulerJobId;
+    bool public scheduled;
 
     event WalletFunded(uint256 amount, uint256 lockDuration);
     event FetchStored(string raw);
     event ParsedStored(string parsed);
     event SynthesisStored(string result);
+    event ScheduleRegistered(uint256 jobId, uint256 interval);
 
-    constructor() {
+    constructor(string memory _url, string memory _instruction) {
         owner = msg.sender;
+        dataSourceUrl = _url;
+        instruction = _instruction;
     }
 
     function fundWallet(uint256 lockDuration) external payable {
@@ -58,20 +80,37 @@ contract FetchAndSynthesize {
         emit WalletFunded(msg.value, lockDuration);
     }
 
-    /// @notice FIX for day 12's bug: raw HTTP response is cleaned/normalized
-    ///         into a proper natural-language instruction before it's used
-    ///         as the LLM prompt. This is what actually made output quality
-    ///         improve — small change, real impact.
-    /// @dev _extractAndBuildPrompt is intentionally simple here — swap in
-    ///      your actual parsing logic (JSON field extraction etc.) based on
-    ///      your real data source's shape.
-    function fetchAndSynthesize(string calldata url, string calldata instruction) external {
+    /// @notice NEW — registers this contract's own runPipeline() selector
+    ///         with the Scheduler precompile, once daily (86400s).
+    ///         Deliberately NOT calling runPipeline() manually after this —
+    ///         want to confirm it fires on its own before trusting it.
+    function scheduleDaily() external {
         require(msg.sender == owner, "not owner");
-        require(walletFunded, "fund RitualWallet before calling a precompile");
+        require(walletFunded, "fund RitualWallet before scheduling");
+        require(!scheduled, "already scheduled");
 
-        // Step 1: fetch (same as day 11/12)
+        uint256 jobId = ISchedulerPrecompile(SCHEDULER_PRECOMPILE).registerRecurring(
+            address(this),
+            this.runPipeline.selector,
+            1 days
+        );
+
+        schedulerJobId = jobId;
+        scheduled = true;
+        emit ScheduleRegistered(jobId, 1 days);
+    }
+
+    /// @notice The actual pipeline logic, now callable by the Scheduler
+    ///         precompile itself, not just manually by the owner.
+    function runPipeline() external {
+        require(
+            msg.sender == owner || msg.sender == SCHEDULER_PRECOMPILE,
+            "unauthorized caller"
+        );
+        require(walletFunded, "fund RitualWallet before running");
+
         IHTTPPrecompile.HTTPRequest memory httpReq = IHTTPPrecompile.HTTPRequest({
-            url: url,
+            url: dataSourceUrl,
             method: "GET",
             headers: "",
             body: ""
@@ -80,12 +119,10 @@ contract FetchAndSynthesize {
         lastRawFetch = raw;
         emit FetchStored(raw);
 
-        // Step 2: parse/clean — the actual day-13 fix
         string memory cleanedPrompt = _buildCleanPrompt(instruction, raw);
         lastParsedInput = cleanedPrompt;
         emit ParsedStored(cleanedPrompt);
 
-        // Step 3: synthesize on the CLEANED input, not raw JSON
         ILLMPrecompile.LLMRequest memory llmReq = ILLMPrecompile.LLMRequest({
             model: "default",
             prompt: cleanedPrompt,
@@ -96,25 +133,11 @@ contract FetchAndSynthesize {
         emit SynthesisStored(result);
     }
 
-    /// @dev Minimal example — wraps raw data with explicit instruction
-    ///      framing instead of dumping it in unlabeled. Replace with real
-    ///      JSON field extraction for your actual data source.
-    function _buildCleanPrompt(string memory instruction, string memory rawData)
+    function _buildCleanPrompt(string memory instr, string memory rawData)
         internal
         pure
         returns (string memory)
     {
-        return string(
-            abi.encodePacked(
-                instruction,
-                "\n\nRelevant data:\n",
-                rawData
-            )
-        );
+        return string(abi.encodePacked(instr, "\n\nRelevant data:\n", rawData));
     }
-
-    // AsyncJobTracker note (for day 13 evening post): the fetch() and
-    // infer() calls above resolve through AsyncJobTracker under the hood —
-    // non-deterministic, long-running work doesn't block deterministic
-    // execution; it's tracked and resolved async, then lands back onchain.
 }
