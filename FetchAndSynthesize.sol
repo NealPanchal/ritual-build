@@ -5,6 +5,7 @@ pragma solidity ^0.8.24;
 /// @notice Day 17 — wires the Scheduler precompile to trigger the
 ///         fetch → parse → synthesize → write pipeline once daily,
 ///         removing the need for manual triggering.
+///         Day 18 — added explicit max token budget per scheduled call.
 /// @dev Repo: github.com/NealPanchal/ritual-build
 ///      Confirm ISchedulerPrecompile signature against ritual-dapp-scheduler
 ///      before relying on this in production — interface below reflects
@@ -61,16 +62,29 @@ contract FetchAndSynthesize {
     uint256 public schedulerJobId;
     bool public scheduled;
 
+    /// @notice Day 18 — added an explicit max token budget per scheduled
+    ///         call, replacing the fixed 256 used since day 13. Prevents
+    ///         cost drift on a job that runs itself unattended.
+    uint256 public maxTokensPerRun = 200;
+
     event WalletFunded(uint256 amount, uint256 lockDuration);
     event FetchStored(string raw);
     event ParsedStored(string parsed);
     event SynthesisStored(string result);
     event ScheduleRegistered(uint256 jobId, uint256 interval);
+    event MaxTokensUpdated(uint256 oldValue, uint256 newValue);
 
     constructor(string memory _url, string memory _instruction) {
         owner = msg.sender;
         dataSourceUrl = _url;
         instruction = _instruction;
+    }
+
+    function setMaxTokens(uint256 newMax) external {
+        require(msg.sender == owner, "not owner");
+        require(newMax > 0, "must be positive");
+        emit MaxTokensUpdated(maxTokensPerRun, newMax);
+        maxTokensPerRun = newMax;
     }
 
     function fundWallet(uint256 lockDuration) external payable {
@@ -123,10 +137,11 @@ contract FetchAndSynthesize {
         lastParsedInput = cleanedPrompt;
         emit ParsedStored(cleanedPrompt);
 
+        // changed from a fixed 256:
         ILLMPrecompile.LLMRequest memory llmReq = ILLMPrecompile.LLMRequest({
             model: "default",
             prompt: cleanedPrompt,
-            maxTokens: 256
+            maxTokens: maxTokensPerRun   // now configurable, was: 256
         });
         string memory result = ILLMPrecompile(LLM_PRECOMPILE).infer(llmReq);
         lastSynthesis = result;
