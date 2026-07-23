@@ -135,6 +135,14 @@ The chain attests that a precompile response is real and untampered. It does not
 
 ## Status
 
-Day 14 of a 30-day build log. Core chained pipeline (fetch → parse → synthesize → write) working end to end on testnet as of day 13. Next: Scheduler precompile for recurring execution, and evaluating `ritual-dapp-skills` for agent-based scaffolding.
+Day 21 of a 30-day build log. Week 3 complete:
+- ritual-dapp-skills scaffolding compared against hand-built pipeline (day 16)
+- Scheduler precompile running a recurring, unattended inference job (day 17)
+- Full recursive agent pattern working end to end — parent agent goal ->
+  coding agent build -> deployed, funded child contract (day 20)
 
-Corrections welcome — open an issue or reply on X if anything here is wrong or out of date.
+Next: week 4 — identity primitives (WebAuthn/Ed25519) and the secrets/
+privacy stack (DKMS, ECIES, redaction, X402).
+
+Corrections welcome — open an issue or reply on X if anything here is
+wrong or out of date.
